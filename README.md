@@ -1,3 +1,5 @@
+> **当前分支是 VMQFox HMAC v2 省电心跳实验版。** 安装和熄屏测试请先读 [HEARTBEAT-TEST.md](docs/HEARTBEAT-TEST.md)。从 GitHub Actions 下载 `vmq-heartbeat-test` 构建产物；仓库历史 `app/app-release.apk` 不是此测试版。测试包与原版分开安装，开启测试监听前须关闭原版监听。
+
 # V免签 Android 监控端 —— 个人开发者收款解决方案
 
 > 🚀 2026 优化版 | 适配 Android 14/15 | AndroidX + OkHttp 4 + ZXing 3.5

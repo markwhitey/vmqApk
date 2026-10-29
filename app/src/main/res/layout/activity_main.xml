@@ -23,7 +23,7 @@
         android:text=" 通知地址：请扫码配置" />
 
     <TextView
-        android:paddingBottom="20dp"
+        android:paddingBottom="8dp"
         android:id="@+id/txt_key"
         android:layout_width="fill_parent"
         android:layout_height="wrap_content"
@@ -59,4 +59,11 @@
         android:onClick="checkPush"
         android:text="检测监听" />
 
+
+    <Button android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:onClick="doListenerSettings" android:text="通知监听设置（测试前关闭原版）" />
+    <Button android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:onClick="doPowerSettings" android:text="设置省电心跳权限" />
+    <TextView android:id="@+id/txt_heartbeat_status" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:padding="12dp" android:textSize="13sp" />
 </LinearLayout>

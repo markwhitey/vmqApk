@@ -7,12 +7,20 @@ android {
         applicationId "com.vone.qrcode"
         minSdkVersion 24
         targetSdkVersion 35
-        versionCode 3
-        versionName "3.0"
+        versionCode 4
+        versionName "3.2-heartbeat-test"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    buildFeatures { buildConfig true }
+    testOptions { unitTests.includeAndroidResources = true }
+
     buildTypes {
+        debug {
+            applicationIdSuffix ".heartbeat"
+            versionNameSuffix "-debug"
+            resValue "string", "app_name", "V免签·省电测试"
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
@@ -45,5 +53,8 @@ dependencies {
 
     // Testing
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+    testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.6.1'
 }

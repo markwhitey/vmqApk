@@ -23,8 +23,6 @@ import android.widget.Toast;
 import androidx.core.app.NotificationCompat;
 
 import java.io.IOException;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -48,10 +46,10 @@ import okhttp3.Response;
  *
  * 【保活方案 - 2026 年有效方案】
  * 1. startForeground() 前台服务：显示持久通知，系统优先级最高
- * 2. WakeLock：防止 CPU 休眠中断通知处理
+ * 2. 有界 WakeLock：仅在心跳请求和收款上报期间保持 CPU 工作
  * 3. onListenerDisconnected() 中调用 requestRebind() 自动重连
  * 4. BootReceiver 开机自启
- * 5. 心跳线程维持服务存活，定期向服务器上报心跳
+ * 5. AlarmManager 每60秒唤醒发送心跳；依赖电池优化白名单和精确定时权限
  *
  * 【注意】
  * Android 13+ 需要用户在"通知使用权"页面手动授权
@@ -128,10 +126,9 @@ public class NeNotificationService2 extends NotificationListenerService {
 
     private String host = "";
     private String key = "";
-    private Thread heartbeatThread = null;
-    private PowerManager.WakeLock mWakeLock = null;
     private OkHttpClient okHttpClient;
     private volatile boolean isRunning = false;
+    static volatile boolean listenerConnected = false;
 
     /**
      * 防重复推送：使用 LRU 缓存记录最近处理的通知
@@ -151,19 +148,9 @@ public class NeNotificationService2 extends NotificationListenerService {
         super.onCreate();
         Log.d(TAG, "Service onCreate");
 
-        // 初始化 OkHttpClient（连接池 + 超时）
-        okHttpClient = new OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
-            .writeTimeout(15, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
-            .build();
-
-        // 启动前台服务（保活核心手段）
+        okHttpClient = MonitorNetwork.CLIENT;
         startForegroundServiceCompat();
-
-        // 申请 WakeLock 防止 CPU 休眠
-        acquireWakeLock();
+        // Do not hold a CPU lock for the lifetime of the notification listener.
     }
 
     /**
@@ -191,7 +178,7 @@ public class NeNotificationService2 extends NotificationListenerService {
             .build();
 
         // Android 10 (Q) 以上需要指定 foregroundServiceType
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIFICATION_ID, notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         } else {
@@ -219,80 +206,11 @@ public class NeNotificationService2 extends NotificationListenerService {
         }
     }
 
-    /**
-     * 申请 CPU WakeLock（防止深度休眠时错过通知）
-     */
-    @SuppressLint("WakelockTimeout")
-    private void acquireWakeLock() {
-        if (mWakeLock == null) {
-            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            if (pm != null) {
-                mWakeLock = pm.newWakeLock(
-                    PowerManager.PARTIAL_WAKE_LOCK,
-                    "VmqApk:PaymentWakeLock"
-                );
-                mWakeLock.acquire();
-                Log.d(TAG, "WakeLock 已申请");
-            }
-        }
-    }
-
-    private void releaseWakeLock() {
-        if (mWakeLock != null && mWakeLock.isHeld()) {
-            mWakeLock.release();
-            mWakeLock = null;
-            Log.d(TAG, "WakeLock 已释放");
-        }
-    }
-
-    /**
-     * 心跳线程（每30秒向服务器上报一次心跳，同时维持服务存活）
-     */
+    /** The OS wake-up alarm replaces Thread.sleep; idle time holds no wake lock. */
     public void initAppHeart() {
-        if (heartbeatThread != null && heartbeatThread.isAlive()) {
-            return;
-        }
-
-        isRunning = true;
-        heartbeatThread = new Thread(() -> {
-            Log.d(TAG, "心跳线程启动");
-            while (isRunning) {
-                try {
-                    SharedPreferences prefs = getSharedPreferences("vone", MODE_PRIVATE);
-                    String h = prefs.getString("host", "");
-                    String k = prefs.getString("key", "");
-
-                    if (!TextUtils.isEmpty(h) && !TextUtils.isEmpty(k)) {
-                        String t = String.valueOf(new Date().getTime());
-                        String sign = md5(t + k);
-                        Request req = new Request.Builder()
-                            .url("http://" + h + "/appHeart?t=" + t + "&sign=" + sign)
-                            .get().build();
-
-                        okHttpClient.newCall(req).enqueue(new Callback() {
-                            @Override
-                            public void onFailure(Call call, IOException e) {
-                                Log.w(TAG, "心跳失败: " + e.getMessage());
-                            }
-                            @Override
-                            public void onResponse(Call call, Response response) throws IOException {
-                                Log.d(TAG, "心跳成功: " + response.code());
-                                response.close();
-                            }
-                        });
-                    }
-
-                    Thread.sleep(30_000);
-                } catch (InterruptedException e) {
-                    Log.d(TAG, "心跳线程中断");
-                    break;
-                } catch (Exception e) {
-                    Log.e(TAG, "心跳异常: " + e.getMessage());
-                }
-            }
-        });
-        heartbeatThread.setDaemon(true);
-        heartbeatThread.start();
+        isRunning = HeartbeatReceiver.mayRun(this);
+        if (isRunning) HeartbeatReceiver.start(this);
+        else HeartbeatReceiver.cancel(this);
     }
 
     // ===================== 通知处理核心逻辑 =====================
@@ -301,7 +219,9 @@ public class NeNotificationService2 extends NotificationListenerService {
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
-        if (sbn == null) return;
+        if (sbn == null || !listenerConnected || !HeartbeatReceiver.mayRun(this)) return;
+        if (sbn.getNotification() != null &&
+                (sbn.getNotification().flags & Notification.FLAG_GROUP_SUMMARY) != 0) return;
         notificationCount++;
         Log.d(TAG, "═══ 第 " + notificationCount + " 条通知到达 ═══ 来自: " + sbn.getPackageName());
         try {
@@ -313,6 +233,7 @@ public class NeNotificationService2 extends NotificationListenerService {
 
     private void processNotification(StatusBarNotification sbn) {
         String pkg = sbn.getPackageName();
+        if (!WECHAT_PACKAGE.equals(pkg) && !ALIPAY_PACKAGE.equals(pkg) && !getPackageName().equals(pkg)) return;
         Notification notification = sbn.getNotification();
         if (notification == null) {
             Log.w(TAG, "━━ 通知为空 [" + pkg + "] ━━");
@@ -560,35 +481,47 @@ public class NeNotificationService2 extends NotificationListenerService {
      */
     public void appPush(int type, double price) {
         if (TextUtils.isEmpty(host) || TextUtils.isEmpty(key)) {
-            Log.e(TAG, "推送失败: 未配置 host/key");
-            showToast("未配置服务地址，请先扫码配置");
-            return;
+            showToast("未配置服务地址，请先扫码配置"); return;
         }
+        // Build once: changing t/sign on retries would create a second receipt event.
+        final Request request;
+        try { request = MonitorProtocol.payment(host, key, type, price, Long.toString(System.currentTimeMillis())); }
+        catch (IllegalArgumentException e) { showToast("服务地址或金额配置错误"); return; }
+        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+        PowerManager.WakeLock lock = power == null ? null : power.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK, "vmq:payment-push");
+        if (lock != null) lock.acquire(75_000);
+        pushAttempt(request, 0, lock);
+    }
 
-        String t = String.valueOf(new Date().getTime());
-        String sign = md5(type + "" + price + t + key);
-        String url = "http://" + host + "/appPush?t=" + t
-            + "&type=" + type + "&price=" + price + "&sign=" + sign;
-
-        Log.d(TAG, "推送 URL: " + url);
-
-        Request request = new Request.Builder().url(url).get().build();
+    private void pushAttempt(Request request, int attempt, PowerManager.WakeLock lock) {
         okHttpClient.newCall(request).enqueue(new Callback() {
-            @Override
-            public void onFailure(Call call, IOException e) {
-                Log.e(TAG, "推送失败: " + e.getMessage());
-                showToast("❌ 推送失败，检查网络: " + e.getMessage());
+            @Override public void onFailure(Call call, IOException e) {
+                finishPush(request, attempt, lock, false, true, "网络请求失败");
             }
-
-            @Override
-            public void onResponse(Call call, Response response) throws IOException {
-                String result = response.body() != null ? response.body().string() : "";
-                Log.d(TAG, "推送响应: " + result);
-                String payType = type == 1 ? "微信" : "支付宝";
-                showToast("✅ " + payType + "收款 ¥" + price + " 已推送");
-                response.close();
+            @Override public void onResponse(Call call, Response response) {
+                try {
+                    MonitorNetwork.Result result = MonitorNetwork.read(response);
+                    finishPush(request, attempt, lock, result.success, result.retryable(), result.summary());
+                } catch (IOException e) {
+                    finishPush(request, attempt, lock, false, true, "响应读取失败");
+                }
             }
         });
+    }
+
+    private void finishPush(Request request, int attempt, PowerManager.WakeLock lock,
+                            boolean success, boolean retryable, String message) {
+        if (!success && retryable && attempt < 2) {
+            Log.w(TAG, "收款上报暂未确认，沿用同一事件重试 " + (attempt + 1));
+            new Handler(Looper.getMainLooper()).postDelayed(
+                    () -> pushAttempt(request, attempt + 1, lock), 2_000L << attempt);
+            return;
+        }
+        try {
+            Log.i(TAG, "收款上报" + (success ? "已确认: " : "未确认: ") + message);
+            showToast(success ? "收款上报已被服务器确认" : "收款上报未成功，请查看日志并核对订单");
+        } finally { if (lock != null && lock.isHeld()) lock.release(); }
     }
 
     // ===================== 生命周期 =====================
@@ -596,12 +529,16 @@ public class NeNotificationService2 extends NotificationListenerService {
     @Override
     public void onListenerConnected() {
         Log.d(TAG, "NotificationListener 已连接");
+        listenerConnected = true;
         initAppHeart();
-        showToast("V免签监听服务已启动 ✅");
+        showToast(isRunning ? "省电监听已启动：约每60秒心跳，无需亮屏" : "测试版已暂停：请先关闭原版的通知监听");
     }
 
     @Override
     public void onListenerDisconnected() {
+        listenerConnected = false;
+        isRunning = false;
+        HeartbeatReceiver.start(this);
         Log.w(TAG, "NotificationListener 断开，尝试重连...");
         // Android 7.0+ 支持主动请求重连
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -625,10 +562,8 @@ public class NeNotificationService2 extends NotificationListenerService {
     public void onDestroy() {
         Log.d(TAG, "Service onDestroy");
         isRunning = false;
-        if (heartbeatThread != null) {
-            heartbeatThread.interrupt();
-        }
-        releaseWakeLock();
+        listenerConnected = false;
+        HeartbeatReceiver.start(this);
         super.onDestroy();
     }
 
@@ -664,20 +599,4 @@ public class NeNotificationService2 extends NotificationListenerService {
         );
     }
 
-    public static String md5(String string) {
-        if (TextUtils.isEmpty(string)) return "";
-        try {
-            MessageDigest md5 = MessageDigest.getInstance("MD5");
-            byte[] bytes = md5.digest(string.getBytes());
-            StringBuilder result = new StringBuilder();
-            for (byte b : bytes) {
-                String hex = Integer.toHexString(b & 0xff);
-                if (hex.length() == 1) result.append("0");
-                result.append(hex);
-            }
-            return result.toString();
-        } catch (NoSuchAlgorithmException e) {
-            return "";
-        }
-    }
 }
