@@ -55,9 +55,12 @@ public class UriUtil {
 
         Cursor cursor = context.getContentResolver().query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,//
                 projection, selection, selectionArgs, null);
-        int columnIndex = cursor.getColumnIndex(projection[0]);
-        if (cursor.moveToFirst()) filePath = cursor.getString(columnIndex);
-        cursor.close();
+        if (cursor != null) {
+            try {
+                int columnIndex = cursor.getColumnIndex(projection[0]);
+                if (columnIndex >= 0 && cursor.moveToFirst()) filePath = cursor.getString(columnIndex);
+            } finally { cursor.close(); }
+        }
         return filePath;
     }
 
@@ -71,9 +74,10 @@ public class UriUtil {
         Cursor cursor = loader.loadInBackground();
 
         if (cursor != null) {
-            cursor.moveToFirst();
-            filePath = cursor.getString(cursor.getColumnIndex(projection[0]));
-            cursor.close();
+            try {
+                int index = cursor.getColumnIndex(projection[0]);
+                if (index >= 0 && cursor.moveToFirst()) filePath = cursor.getString(index);
+            } finally { cursor.close(); }
         }
         return filePath;
     }
@@ -86,9 +90,10 @@ public class UriUtil {
         String[] projection = {MediaStore.Images.Media.DATA};
         Cursor cursor = context.getContentResolver().query(uri, projection, null, null, null);
         if (cursor != null) {
-            cursor.moveToFirst();
-            filePath = cursor.getString(cursor.getColumnIndex(projection[0]));
-            cursor.close();
+            try {
+                int index = cursor.getColumnIndex(projection[0]);
+                if (index >= 0 && cursor.moveToFirst()) filePath = cursor.getString(index);
+            } finally { cursor.close(); }
         }
         return filePath;
     }

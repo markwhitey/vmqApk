@@ -25,6 +25,7 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
+import androidx.core.app.NotificationCompat;
 import com.google.zxing.activity.CaptureActivity;
 import com.vone.qrcode.BuildConfig;
 import com.vone.qrcode.R;
@@ -170,8 +171,14 @@ public class MainActivity extends AppCompatActivity {
         if (!HeartbeatReceiver.mayRun(this)) { doListenerSettings(null); return; }
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (manager == null) return;
-        manager.createNotificationChannel(new NotificationChannel("monitor_test", "监听测试", NotificationManager.IMPORTANCE_DEFAULT));
-        manager.notify(1102, new Notification.Builder(this, "monitor_test")
+        if (Build.VERSION.SDK_INT >= 33 && ActivityCompat.checkSelfPermission(this,
+                Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            toast("请先允许本应用发送通知，再检测监听"); return;
+        }
+        if (Build.VERSION.SDK_INT >= 26) {
+            manager.createNotificationChannel(new NotificationChannel("monitor_test", "监听测试", NotificationManager.IMPORTANCE_DEFAULT));
+        }
+        manager.notify(1102, new NotificationCompat.Builder(this, "monitor_test")
                 .setSmallIcon(R.mipmap.ic_launcher).setContentTitle("V免签测试推送")
                 .setContentText("这是一条测试推送信息，如果程序正常，则会提示监听权限正常").build());
     }
